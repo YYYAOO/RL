@@ -1,0 +1,174 @@
+import random
+import copy
+import tensorflow as tf
+import numpy as np
+
+
+# 生成算例
+def date_gen(data_size, num_low, num_high, data_len):
+    train_x_gen = []
+    train_y_target_gen = []
+    for _ in range(data_size):
+        y_low = np.random.randint(low=num_low, high=num_high)
+        y_in = list(range(y_low, y_low + data_len, 1))
+        train_y_target_gen.append(copy.deepcopy(y_in))
+        random.shuffle(y_in)
+        train_x_gen.append(copy.deepcopy(y_in))
+    train_x_gen = np.array(train_x_gen)
+    train_y_target_gen = np.array(train_y_target_gen)
+    return train_x_gen, train_y_target_gen
+
+
+# 继承tf.keras.Model基类--自定义模型类
+class Seq2Seq(tf.keras.Model):
+    # 初始化 创建类的对象时执行 保存变量
+    def __init__(self, enc_in_dim, emb_dim, lstm_units, dec_in_dim, data_len):
+        super().__init__()  # 继承父类
+        self.enc_in_dim = enc_in_dim
+        self.emb_dim = emb_dim
+        self.lstm_units = lstm_units
+        self.dec_in_dim = dec_in_dim
+        self.data_len = data_len
+        # 建模
+        # encode
+        self.enc_embeddings = tf.keras.layers.Embedding(
+            input_dim=self.enc_in_dim,
+            output_dim=self
+                .emb_dim,  # [enc_n_vocab, emb_dim]
+            embeddings_initializer=tf.initializers.RandomNormal(0., 0.1),
+            name='encoder/embeddings'
+        )
+        self.encoder = tf.keras.layers.LSTM(units=self.lstm_units, return_state=True, name='encoder/LSTM')
+        # decode
+        self.dec_embeddings = tf.keras.layers.Embedding(
+            input_dim=self.dec_in_dim, output_dim=self.emb_dim,  # [dec_n_vocab, emb_dim]
+            embeddings_initializer=tf.initializers.RandomNormal(0., 0.1),
+            name='decoder/embeddings'
+        )
+        self.decoder = tf.keras.layers.LSTM(units=self.lstm_units, return_state=True, return_sequences=True,
+                                            name='decoder/LSTM')
+        self.decoder_dense = tf.keras.layers.Dense(self.dec_in_dim, activation=tf.keras.activations.softmax,
+                                                   name='decoder/Dense')
+
+    # 编码
+    def encode(self, x):
+        # 嵌入层
+        embedded = self.enc_embeddings(x)
+        # lstm层
+        o, h, c = self.encoder(embedded)
+        return h, c
+
+    # 解码
+    def decode(self, batch, h, c, y=None, training=True):
+        if training:  # 训练：将上一时刻的标签作为当前时刻的输入
+            # 嵌入层
+            y = self.dec_embeddings(y)
+            # lstm层
+            y, h, c = self.decoder(y, (h, c))
+            # dense层
+            y = self.decoder_dense(y)
+        else:  # 预测：将上一时刻的输出作为当前时刻的输入
+            y = []
+            o = tf.zeros((batch, 1, self.dec_in_dim))
+            for i in range(self.data_len):
+                o = o @ self.dec_embeddings.weights  # @矩阵乘法
+                # lstm层
+                o, h, c = self.decoder(o, (h, c))  # input, initial_state
+                # dense层
+                o = self.decoder_dense(o)
+                y.append(o)
+            y = tf.concat(y, 1)  # 拼接张量的函数 在第1个维度上拼接
+        return y
+
+    # 被调用的时候执行
+    def call(self, inputs, training=True, mask=None):
+        # print(training)
+        x = inputs[0]
+        y = inputs[1]
+        if training:  # 训练
+            y = tf.pad(y[:, :-1], [[0, 0], [1, 0]])  # [[0, 0], [1, 0]] 上下右各0行，左1行进行填充0
+        # 编码
+        h, c = self.encode(x)
+        batch = tf.shape(x)[0]
+        # 解码
+        y = self.decode(batch, h, c, y, training)
+        return y
+
+
+# class myTensorboard(tf.keras.callbacks.TensorBoard):
+#     def __init__(self, data_x, data_y, Batch_size, log_dir='logs/seq2seq', histogram_freq=1, write_graph=True, write_images=True,
+#                  embeddings_freq=10, **kwargs):
+#         self.data_x = data_x
+#         self.data_y = data_y
+#         self.Batch_size = Batch_size
+#         super().__init__(log_dir=log_dir, histogram_freq=histogram_freq, write_graph=write_graph,
+#                          write_images=write_images, embeddings_freq=embeddings_freq, **kwargs)
+
+    # def on_epoch_end(self, epoch, logs=None):
+#         if (not epoch % 1):
+    #         # 随机选择数据进行训练
+    #         ran = []
+    #         for _ in range(self.Batch_size):
+    #             ran.append(np.random.randint(low=0, high=len(self.data_x)))
+    #         x = self.data_x[ran]
+    #         y = self.data_y[ran]
+    #         y_ = self.model((x, y), training=False)
+    #         y_ = tf.argmax(y_, -1).numpy()  # tf.argmax（）返回最大的那个数值所在的下标 .numpy()将Tensor变量转换为ndarray变量  input, axis
+    #         print(
+    #             '\n',
+    #             "epoch: ", epoch,
+    #             "| input: ", x[-1],
+    #             "| target: ", y[-1],
+    #             "| inference: ", y_[-1],
+    #         )
+    #     super(myTensorboard, self).on_epoch_end(epoch, logs)  # 继承父类 打印loss和准确率
+
+
+if __name__ == "__main__":
+    # 训练多少轮
+    Epochs = 100
+    # 批量 小批的梯度下降
+    Batch_size = 30
+    num_low, num_high, data_len = 0, 100, 10
+    # embedding输入数据的维度
+    enc_in_dim = int(num_high - num_low + 10)
+    # embedding的输出维度
+    emb_dim = 16
+    # lstm的神经元个数
+    lstm_units = 32
+    # dense的输入维度
+    dec_in_dim = int(num_high - num_low + 10)
+    # 学习速率
+    Learn_rate = 0.001
+
+    # 生成数据集
+    data_size = 500
+    train_x, train_y_target = date_gen(data_size, num_low, num_high, data_len)
+
+    # 展示一条数据
+    print("x", train_x[0])
+    print("y", train_y_target[0])
+
+    # 建模
+    model = Seq2Seq(enc_in_dim, emb_dim, lstm_units, dec_in_dim, data_len)
+    model.compile(optimizer=tf.keras.optimizers.Adam(Learn_rate),
+                  loss=tf.keras.losses.SparseCategoricalCrossentropy(False),
+                  metrics=[tf.keras.metrics.sparse_categorical_accuracy])
+    model.call((train_x, train_y_target))
+    # 训练
+    model.fit((train_x, train_y_target), train_y_target, batch_size=Batch_size, epochs=Epochs)  # batch_size:小批的梯度下降 epochs 完整遍历数据集多少次
+    print("predict")
+    # 随机产生一个进行测试
+    y_ = list(range(40, 40 + 10, 1))
+    x_ = copy.deepcopy(y_)
+    random.shuffle(x_)
+    x_ = [x_]
+    y_ = [y_]
+    print(x_)
+    print(y_)
+    y_p = model.predict((np.array(x_), np.array([[0 for _ in range(data_len)]])))
+    y_p = tf.argmax(y_p, -1).numpy()
+    print(y_p)
+    # y_p = model((np.array(x_), np.array([[0 for _ in range(data_len)]])), training=False)
+    # y_p = tf.argmax(y_p, -1).numpy()
+    # print(y_p)
