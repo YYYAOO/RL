@@ -2,7 +2,6 @@
 import random
 import copy
 import tensorflow as tf
-import tensorflow_addons as tfa
 import numpy as np
 
 
@@ -82,8 +81,7 @@ class Seq2Seq(tf.keras.Model):
                                             name='decoder/LSTM')
         self.decoder_dense = tf.keras.layers.Dense(self.dec_in_dim, activation=tf.keras.activations.softmax,
                                                    name='decoder/Dense')
-        self.attention = tfa.seq2seq.LuongAttention(self.dec_in_dim)
-        # self.attention = Attention(self.dec_in_dim)
+        self.attention = Attention(self.dec_in_dim)
 
     # 编码
     def encode(self, x):
