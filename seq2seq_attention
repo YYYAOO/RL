@@ -1,0 +1,176 @@
+import random
+import copy
+import tensorflow as tf
+import tensorflow_addons as tfa
+import numpy as np
+
+
+# LuongAttention  https://arxiv.org/pdf/1508.04025.pdf
+class Attention(tf.keras.layers.Layer):
+    def __init__(self, dec_in_dim, **kwargs):
+        super(Attention, self).__init__(**kwargs)
+        self.dec_in_dim = dec_in_dim
+
+    # build函数：动态获取输入数据的shape
+    def build(self, input_shape):
+        hs_shape, ht_shape = input_shape  # hs_shape：encoding层输出的shape ht_shape：decoding lstm层的输出的shape
+        units = hs_shape[2]  # lstm的神经元个数
+        super(Attention, self).build(input_shape)
+        self.Wa = self.add_weight('Wa', [units, units], tf.float32, tf.keras.initializers.RandomNormal(),
+                                  trainable=True)
+        self.Wc = self.add_weight('Wc', [units * 2, units], tf.float32, tf.keras.initializers.RandomNormal(),
+                                  trainable=True)  # trainable=True 变量可以被优化器更新
+        self.dense = tf.keras.layers.Dense(self.dec_in_dim, activation=tf.keras.activations.softmax)
+
+    def call(self, inputs, use_attention=True, **kwargs):
+        hs, ht = inputs  # encoder输出序列[banch,enc_len,units],decoder输出[b,dec_len,units]
+        # dec_len = 1 if not training
+        # ht对每个hs计算权重a(s) 计算每个encoder中单词hs的权重
+        score = ht @ self.Wa @ tf.transpose(hs, [0, 2, 1])  # [banch,1,enc_len] tf.transpose:数组的转置函数
+        # 转换成概率
+        at = tf.nn.softmax(score, name='attentionValue')
+        # 将权重a(s)和hs相乘，获得加权和ct
+        ct = at @ hs
+        # 将ct和ht相拼接之后经过经过全连接层，获得新的ht’
+        ht_ = tf.nn.tanh(tf.concat([ct, ht], 2) @ self.Wc)  # tf.concat拼接张量的函数
+        ht_ = ht_ if use_attention else ht
+        y = self.dense(ht_)  # ht_.shape==ht.shape
+        return y, at
+
+
+def date_gen(data_size, num_low, num_high, data_len):
+    train_x_gen = []
+    train_y_target_gen = []
+    for _ in range(data_size):
+        y_low = np.random.randint(low=num_low, high=num_high)
+        y_in = list(range(y_low, y_low + data_len, 1))
+        train_y_target_gen.append(copy.deepcopy(y_in))
+        random.shuffle(y_in)
+        train_x_gen.append(copy.deepcopy(y_in))
+    train_x_gen = np.array(train_x_gen)
+    train_y_target_gen = np.array(train_y_target_gen)
+    return train_x_gen, train_y_target_gen
+
+
+# 继承tf.keras.Model基类--自定义模型类
+class Seq2Seq(tf.keras.Model):
+    # 初始化 创建类的对象时执行 保存变量
+    def __init__(self, enc_in_dim, emb_dim, lstm_units, dec_in_dim, data_len):
+        super().__init__()  # 继承父类
+        self.enc_in_dim = enc_in_dim
+        self.emb_dim = emb_dim
+        self.lstm_units = lstm_units
+        self.dec_in_dim = dec_in_dim
+        self.data_len = data_len
+
+        self.enc_embeddings = tf.keras.layers.Embedding(
+            input_dim=self.enc_in_dim,
+            output_dim=self.emb_dim,  # [enc_n_vocab, emb_dim]
+            embeddings_initializer=tf.initializers.RandomNormal(0., 0.1),
+            name='encoder/embeddings'
+        )
+        self.encoder = tf.keras.layers.LSTM(units=self.lstm_units, return_state=True, return_sequences=True, name='encoder/LSTM')
+        # decode
+        self.dec_embeddings = tf.keras.layers.Embedding(
+            input_dim=self.enc_in_dim, output_dim=self.emb_dim,  # [dec_n_vocab, emb_dim]
+            embeddings_initializer=tf.initializers.RandomNormal(0., 0.1),
+            name='decoder/embeddings'
+        )
+        self.dec_embeddings.build((None, self.dec_in_dim))
+        self.decoder = tf.keras.layers.LSTM(units=self.lstm_units, return_state=True, return_sequences=True,
+                                            name='decoder/LSTM')
+        self.decoder_dense = tf.keras.layers.Dense(self.dec_in_dim, activation=tf.keras.activations.softmax,
+                                                   name='decoder/Dense')
+        self.attention = tfa.seq2seq.LuongAttention(self.dec_in_dim)
+        # self.attention = Attention(self.dec_in_dim)
+
+    # 编码
+    def encode(self, x):
+        # 嵌入层
+        embedded = self.enc_embeddings(x)
+        # lstm层
+        o, h, c = self.encoder(embedded)
+        return o, h, c
+
+    # 解码
+    def decode(self, batch, enc_o, h, c, y=None, training=True):
+        if training:  # 将上一时刻的标签作为当前时刻的输入
+            # print("training")
+            # 嵌入层
+            y = self.dec_embeddings(y)
+            # lstm层
+            y, h, c = self.decoder(y, (h, c))
+            # attention层
+            y, at = self.attention((enc_o, y))  # 输入：encoding的输出 decoding层lstm层之后的输出
+        else:  # 将上一时刻的输出作为当前时刻的输入
+            # print("predict")
+            y = []
+            o = tf.zeros((batch, 1, self.dec_in_dim))
+            for i in range(self.data_len):
+                o = o @ self.dec_embeddings.weights  # @矩阵乘法
+                # lstm层
+                o, h, c = self.decoder(o, (h, c))  # input, initial_state
+                # attention层
+                o, at = self.attention((enc_o, o))
+                y.append(o)
+            y = tf.concat(y, 1)  # 拼接张量的函数 在第1个维度上拼接
+        return y
+
+    # 被调用的时候执行，在build之后
+    def call(self, inputs, training=True):
+        x = inputs[0]
+        y = inputs[1]
+        if training:
+            y = tf.pad(y[:, :-1], [[0, 0], [1, 0]])
+        # 编码
+        o, h, c = self.encode(x)
+        batch = tf.shape(x)[0]
+        # 解码
+        y = self.decode(batch, o, h, c, y, training)
+        return y
+
+
+if __name__ == "__main__":
+    # 训练多少轮
+    Epochs = 200
+    # 批量
+    Batch_size = 30
+    num_low, num_high, data_len = 0, 50, 10
+    # embedding输入数据的维度
+    enc_in_dim = int(num_high - num_low + 10)
+    # embedding的输出维度
+    emb_dim = 16
+    # lstm的神经元个数
+    lstm_units = 32
+    # dense的输入维度
+    dec_in_dim = int(num_high - num_low + 10)
+    # 学习速率
+    Learn_rate = 0.001
+
+    # 生成数据
+    data_size = 500
+    train_x, train_y_target = date_gen(data_size, num_low, num_high, data_len)
+
+    # 展示数据
+    print("x", train_x[0])
+    print("y", train_y_target[0])
+
+    # 建模
+    model = Seq2Seq(enc_in_dim, emb_dim, lstm_units, dec_in_dim, data_len)
+    model.compile(optimizer=tf.keras.optimizers.Adam(Learn_rate),
+                  loss=tf.keras.losses.SparseCategoricalCrossentropy(False),
+                  metrics=[tf.keras.metrics.sparse_categorical_accuracy])
+    model.call((train_x, train_y_target))
+    model.fit((train_x, train_y_target), train_y_target, batch_size=Batch_size, epochs=Epochs)
+    print("predict")
+    # 随机产生一个进行测试
+    y_ = list(range(40, 40 + 10, 1))
+    x_ = copy.deepcopy(y_)
+    random.shuffle(x_)
+    x_ = [x_]
+    y_ = [y_]
+    y_p = model.predict((np.array(x_), np.array([[0 for _ in range(data_len)]])))
+    y_p = tf.argmax(y_p, -1).numpy()
+    print(x_)
+    print(y_)
+    print(y_p)
