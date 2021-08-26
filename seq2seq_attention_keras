@@ -159,7 +159,7 @@ if __name__ == "__main__":
     model.compile(optimizer=tf.keras.optimizers.Adam(Learn_rate),
                   loss=tf.keras.losses.SparseCategoricalCrossentropy(False),
                   metrics=[tf.keras.metrics.sparse_categorical_accuracy])
-    model.call((train_x, train_y_target))
+    # model.call((train_x, train_y_target))
     model.fit((train_x, train_y_target), train_y_target, batch_size=Batch_size, epochs=Epochs)
     print("predict")
     # 随机产生一个进行测试
